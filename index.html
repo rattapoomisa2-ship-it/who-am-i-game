@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Who Am I - Party Game</title>
+    <style>
+        :root { --primary: #6366f1; --bg: #f8fafc; }
+        body { font-family: 'Kanit', sans-serif; background: var(--bg); display: flex; justify-content: center; padding: 20px; }
+        .card { background: white; padding: 2rem; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        .hidden { display: none; }
+        input, select, button { width: 100%; padding: 10px; margin: 10px 0; border-radius: 8px; border: 1px solid #ddd; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; }
+        button.secondary { background: #64748b; }
+        button.danger { background: #ef4444; }
+        .player-list { list-style: none; padding: 0; }
+        .player-item { background: #f1f5f9; padding: 10px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; }
+        .word-box { font-size: 2rem; text-align: center; padding: 40px; border: 4px dashed var(--primary); margin: 20px 0; border-radius: 15px; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div id="screen-main">
+        <h1>Who Am I? 🎭</h1>
+        <input type="text" id="player-name" placeholder="ชื่อของคุณ">
+        <button onclick="showCreateRoom()">สร้างห้องใหม่</button>
+        <input type="text" id="join-code" placeholder="ใส่รหัสห้อง (เช่น 1234)">
+        <button class="secondary" onclick="joinRoom()">เข้าร่วมห้อง</button>
+        <hr>
+        <h3>จัดการหมวดหมู่คำ</h3>
+        <input type="text" id="cat-name" placeholder="ชื่อหมวดหมู่">
+        <textarea id="cat-words" style="width:100%; height:60px;" placeholder="คำต่างๆ (คั่นด้วยคอมม่า , )"></textarea>
+        <button class="secondary" onclick="saveCategory()">บันทึกหมวดหมู่</button>
+        <div id="saved-cats-list"></div>
+    </div>
+
+    <div id="screen-lobby" class="hidden">
+        <h2>ห้อง: <span id="display-room-code"></span></h2>
+        <div id="host-controls" class="hidden">
+            <label>เลือกหมวดหมู่เล่น:</label>
+            <select id="select-category"></select>
+            <button onclick="startGame()">เริ่มเกม!</button>
+        </div>
+        <h3>ผู้เล่นในห้อง:</h3>
+        <ul id="player-list" class="player-list"></ul>
+        <button class="danger" onclick="cancelRoom()">ยกเลิกห้อง / ออก</button>
+    </div>
+
+    <div id="screen-game" class="hidden">
+        <h2 id="status-msg">คำที่เพื่อนเห็น (คุณไม่เห็นของตัวเอง):</h2>
+        <div id="game-view">
+            </div>
+        <button class="secondary" onclick="exitGame()">ออกจากเกม (กลับห้องรอ)</button>
+    </div>
+</div>
+
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, set, onValue, push, remove, update } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+    // --- กรุณานำ Config จาก Firebase ของคุณมาใส่ตรงนี้ ---
+const firebaseConfig = {
+  apiKey: "AIzaSyAwX5XeNQSICb2hINHJDVgaM1S9xptTufs",
+  authDomain: "pk12-ae2d3.firebaseapp.com",
+  projectId: "pk12-ae2d3",
+  storageBucket: "pk12-ae2d3.firebasestorage.app",
+  messagingSenderId: "258433792056",
+  appId: "1:258433792056:web:57a65fae663aa032814ecd",
+  measurementId: "G-HLF5KELW2T"
+};
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    let currentRoom = null;
+    let myId = null;
+    let isHost = false;
+
+    // ระบบจัดการหมวดหมู่ (Save ลง LocalStorage)
+    window.saveCategory = () => {
+        const name = document.getElementById('cat-name').value;
+        const words = document.getElementById('cat-words').value;
+        if(!name || !words) return alert("กรุณากรอกข้อมูล");
+        let cats = JSON.parse(localStorage.getItem('myCats') || '{}');
+        cats[name] = words.split(',').map(s => s.trim());
+        localStorage.setItem('myCats', JSON.stringify(cats));
+        loadSavedCategories();
+        alert("บันทึกแล้ว!");
+    };
+
+    function loadSavedCategories() {
+        const cats = JSON.parse(localStorage.getItem('myCats') || '{}');
+        const list = document.getElementById('saved-cats-list');
+        const select = document.getElementById('select-category');
+        list.innerHTML = ''; select.innerHTML = '';
+        for(let name in cats) {
+            list.innerHTML += `<small>${name} </small>`;
+            select.innerHTML += `<option value="${name}">${name}</option>`;
+        }
+    }
+    loadSavedCategories();
+
+    // ระบบห้อง
+    window.showCreateRoom = () => {
+        const name = document.getElementById('player-name').value;
+        if(!name) return alert("ใส่ชื่อก่อนครับ");
+        const code = Math.floor(1000 + Math.random() * 9000).toString();
+        isHost = true;
+        setupRoom(code, name);
+    };
+
+    window.joinRoom = () => {
+        const name = document.getElementById('player-name').value;
+        const code = document.getElementById('join-code').value;
+        if(!name || !code) return alert("ใส่ชื่อและรหัสห้อง");
+        isHost = false;
+        setupRoom(code, name);
+    };
+
+    function setupRoom(code, name) {
+        currentRoom = code;
+        myId = name + Date.now();
+        document.getElementById('display-room-code').innerText = code;
+        
+        const playerRef = ref(db, `rooms/${code}/players/${myId}`);
+        set(playerRef, { name: name, word: "?" });
+
+        if(isHost) document.getElementById('host-controls').classList.remove('hidden');
+        
+        showScreen('screen-lobby');
+
+        onValue(ref(db, `rooms/${code}`), (snapshot) => {
+            const data = snapshot.val();
+            if(!data) {
+                alert("ห้องถูกยกเลิก");
+                location.reload();
+                return;
+            }
+            updateUI(data);
+        });
+    }
+
+    function updateUI(data) {
+        const list = document.getElementById('player-list');
+        list.innerHTML = '';
+        const players = data.players || {};
+        
+        for(let id in players) {
+            list.innerHTML += `<li class="player-item">${players[id].name} ${id === myId ? '(คุณ)' : ''}</li>`;
+        }
+
+        if(data.status === 'playing') {
+            showScreen('screen-game');
+            const gameView = document.getElementById('game-view');
+            gameView.innerHTML = '';
+            for(let id in players) {
+                if(id !== myId) {
+                    gameView.innerHTML += `<div class="player-item"><b>${players[id].name}:</b> <span>${players[id].word}</span></div>`;
+                } else {
+                    gameView.innerHTML += `<div class="word-box">?</div><p style="text-align:center">นี่คือคำของคุณ ทายให้ถูกนะ!</p>`;
+                }
+            }
+        } else {
+            showScreen('screen-lobby');
+        }
+    }
+
+    window.startGame = () => {
+        const catName = document.getElementById('select-category').value;
+        const words = JSON.parse(localStorage.getItem('myCats'))[catName];
+        
+        onValue(ref(db, `rooms/${currentRoom}/players`), (snap) => {
+            const players = snap.val();
+            let updates = {};
+            for(let id in players) {
+                const randomWord = words[Math.floor(Math.random() * words.length)];
+                updates[`rooms/${currentRoom}/players/${id}/word`] = randomWord;
+            }
+            updates[`rooms/${currentRoom}/status`] = 'playing';
+            update(ref(db), updates);
+        }, { onlyOnce: true });
+    };
+
+    window.exitGame = () => {
+        update(ref(db, `rooms/${currentRoom}`), { status: 'waiting' });
+    };
+
+    window.cancelRoom = () => {
+        if(isHost) remove(ref(db, `rooms/${currentRoom}`));
+        location.reload();
+    };
+
+    function showScreen(id) {
+        ['screen-main', 'screen-lobby', 'screen-game'].forEach(s => {
+            document.getElementById(s).classList.add('hidden');
+        });
+        document.getElementById(id).classList.remove('hidden');
+    }
+</script>
+</body>
+</html>
